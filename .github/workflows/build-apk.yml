@@ -4,7 +4,9 @@ name: Build AryanVPN APK
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
 
 permissions:
   contents: read
@@ -14,12 +16,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
 
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-
     steps:
-      - name: Check out AryanVPN source
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -41,18 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f -name sdkmanager | sort -V | tail -n 1)"
-
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "ERROR: Android sdkmanager was not found."
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          "$SDKMANAGER" --install \
+          sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
@@ -69,40 +56,34 @@ jobs:
       - name: Check source integrity
         run: python3 scripts/check-source.py
 
-      - name: Build pinned sing-box libbox.aar
+      - name: Build sing-box libbox.aar
         shell: bash
         run: |
           set -euo pipefail
-
           git clone --depth 1 --branch v1.9.7 \
             https://github.com/SagerNet/sing-box.git \
             "$RUNNER_TEMP/sing-box"
 
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
           chmod +x scripts/build-libbox.sh
           ./scripts/build-libbox.sh "$RUNNER_TEMP/sing-box"
 
-      - name: Install Gradle 8.7 and generate wrapper
+      - name: Install Gradle and generate wrapper
         shell: bash
         run: |
           set -euo pipefail
-
           curl -fsSL \
             https://services.gradle.org/distributions/gradle-8.7-bin.zip \
             -o "$RUNNER_TEMP/gradle.zip"
 
           unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
-
-          "$RUNNER_TEMP/gradle-8.7/bin/gradle" wrapper \
-            --gradle-version 8.7
-
+          "$RUNNER_TEMP/gradle-8.7/bin/gradle" wrapper --gradle-version 8.7
           chmod +x gradlew
 
-      - name: Run unit tests and build debug APK
+      - name: Build debug APK
         run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
 
-      - name: Upload debug APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: AryanVPN-debug-apk
