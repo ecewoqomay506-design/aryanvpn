@@ -42,7 +42,7 @@ object ConfigBuilder {
             .put("outbounds", JSONArray().put(proxy)
                 .put(JSONObject().put("type", "direct").put("tag", "direct"))
                 .put(JSONObject().put("type", "dns").put("tag", "dns-out")))
-            .put("route", JSONObject().put("auto_detect_interface", mixedPort == null).put("final", "proxy")
+            .put("route", JSONObject().put("auto_detect_interface", false).put("final", "proxy")
                 .put("rules", JSONArray()
                     .put(JSONObject().put("protocol", "dns").put("outbound", "dns-out"))
                     .put(JSONObject().put("ip_is_private", true).put("outbound", "direct"))))
