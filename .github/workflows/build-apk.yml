@@ -1,7 +1,7 @@
 ```yaml
 name: Build AryanVPN APK
 
-on:
+'on':
   workflow_dispatch:
   push:
     branches:
@@ -39,6 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
@@ -60,6 +61,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           git clone --depth 1 --branch v1.9.7 \
             https://github.com/SagerNet/sing-box.git \
             "$RUNNER_TEMP/sing-box"
@@ -72,6 +74,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           curl -fsSL \
             https://services.gradle.org/distributions/gradle-8.7-bin.zip \
             -o "$RUNNER_TEMP/gradle.zip"
