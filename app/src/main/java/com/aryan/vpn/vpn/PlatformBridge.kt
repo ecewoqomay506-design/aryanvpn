@@ -6,13 +6,16 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import io.nekohasekai.libbox.*
 import java.net.NetworkInterface as JavaNetworkInterface
 
 /**
  * PlatformInterface for sing-box libbox 1.9.7 (pinned).
- * Fixed: usePlatformDefaultInterfaceMonitor = true + real Android NetworkCallback
- * to avoid "netlink socket in Android is banned by Google".
+ * Fixed:
+ * 1. usePlatformDefaultInterfaceMonitor = true (fixes netlink ban)
+ * 2. All callbacks to Go are posted on Main Thread (fixes "stack split at bad time")
  */
 class PlatformBridge(
     private val svc: AryanVpnService
@@ -20,6 +23,8 @@ class PlatformBridge(
 
     private val connectivity: ConnectivityManager =
         svc.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var currentListener: InterfaceUpdateListener? = null
@@ -47,7 +52,7 @@ class PlatformBridge(
 
     override fun uidByPackageName(packageName: String) = -1
 
-    // ─── Critical fix for netlink error ───────────────────────────────────────
+    // ─── Critical fix for netlink error + stack split crash ───────────────────
     override fun usePlatformDefaultInterfaceMonitor() = true
 
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
@@ -69,10 +74,12 @@ class PlatformBridge(
             }
 
             override fun onLost(network: Network) {
-                // No default network
-                try {
-                    listener.updateDefaultInterface("", -1)
-                } catch (_: Throwable) {
+                // Must post to Main Thread to avoid Go runtime stack split crash
+                mainHandler.post {
+                    try {
+                        currentListener?.updateDefaultInterface("", -1)
+                    } catch (_: Throwable) {
+                    }
                 }
             }
         }
@@ -89,7 +96,7 @@ class PlatformBridge(
                 connectivity.registerNetworkCallback(request, callback)
             }
         } catch (e: Exception) {
-            // Fallback: still keep listener, but without live updates
+            // Fallback: keep listener but without live updates
             networkCallback = null
         }
     }
@@ -111,21 +118,25 @@ class PlatformBridge(
 
     private fun notifyDefaultInterface(network: Network) {
         val listener = currentListener ?: return
-        try {
-            val link = connectivity.getLinkProperties(network) ?: return
-            val name = link.interfaceName ?: return
 
-            var index = -1
+        // Critical: always post to Main Thread before calling into Go
+        mainHandler.post {
             try {
-                val iface = JavaNetworkInterface.getByName(name)
-                if (iface != null) {
-                    index = iface.index
-                }
-            } catch (_: Exception) {
-            }
+                val link = connectivity.getLinkProperties(network) ?: return@post
+                val name = link.interfaceName ?: return@post
 
-            listener.updateDefaultInterface(name, index)
-        } catch (_: Throwable) {
+                var index = -1
+                try {
+                    val iface = JavaNetworkInterface.getByName(name)
+                    if (iface != null) {
+                        index = iface.index
+                    }
+                } catch (_: Exception) {
+                }
+
+                listener.updateDefaultInterface(name, index)
+            } catch (_: Throwable) {
+            }
         }
     }
     // ─────────────────────────────────────────────────────────────────────────
