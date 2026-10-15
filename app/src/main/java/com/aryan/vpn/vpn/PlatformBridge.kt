@@ -35,7 +35,7 @@ class PlatformBridgeNoTun : PlatformInterface {
     override fun findConnectionOwner(ipProtocol: Int, sourceAddress: String, sourcePort: Int, destinationAddress: String, destinationPort: Int) = -1
     override fun packageNameByUid(uid: Int) = ""
     override fun uidByPackageName(packageName: String) = -1
-    override fun usePlatformDefaultInterfaceMonitor() = false
+    override fun usePlatformDefaultInterfaceMonitor() = true
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {}
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {}
     override fun usePlatformInterfaceGetter() = false
