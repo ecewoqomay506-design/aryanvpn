@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import com.aryan.vpn.AryanApp
@@ -17,11 +18,9 @@ import io.nekohasekai.libbox.TunOptions
 import kotlinx.coroutines.*
 
 /**
- * Real tunnel built on sing-box libbox 1.9.7.
- * Fixed:
- * - BoxService.start() runs on Main Thread → avoids "stack split at bad time"
- * - startEngine uses block body → fixes "must return a value of type Any"
- * - tunnelProbe stays off Main Thread
+ * Fixed for libbox 1.9.7 on Android (especially MIUI):
+ * - BoxService.start() runs on a dedicated HandlerThread
+ *   to avoid "runtime: stack split at bad time" during OpenTun callback.
  */
 class AryanVpnService : VpnService() {
 
@@ -29,6 +28,10 @@ class AryanVpnService : VpnService() {
     private var box: BoxService? = null
     private var tunFd: ParcelFileDescriptor? = null
     private val lock = Any()
+
+    // Dedicated thread for starting the Go engine (larger effective stack)
+    private val starterThread = HandlerThread("libbox-starter").apply { start() }
+    private val starterHandler = Handler(starterThread.looper)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -40,8 +43,8 @@ class AryanVpnService : VpnService() {
             }
             else -> {
                 startForeground(1, notification())
-                // Must run on Main Thread to prevent Go runtime stack split crash
-                Handler(Looper.getMainLooper()).post {
+                // Start engine on dedicated thread (not Main, not IO pool)
+                starterHandler.post {
                     startEngine()
                 }
             }
@@ -60,10 +63,13 @@ class AryanVpnService : VpnService() {
                 return
             }
 
-            VpnState.state.value = if (VpnState.reconnectAttempts.value > 0) {
-                ConnState.RECONNECTING
-            } else {
-                ConnState.CONNECTING
+            // Update UI state on Main Thread
+            Handler(Looper.getMainLooper()).post {
+                VpnState.state.value = if (VpnState.reconnectAttempts.value > 0) {
+                    ConnState.RECONNECTING
+                } else {
+                    ConnState.CONNECTING
+                }
             }
 
             try {
@@ -74,9 +80,11 @@ class AryanVpnService : VpnService() {
                 svc.start()
                 box = svc
 
-                VpnState.engineResult.value = "Started"
+                Handler(Looper.getMainLooper()).post {
+                    VpnState.engineResult.value = "Started"
+                }
 
-                // Verify tunnel on background thread
+                // Tunnel probe on background
                 scope.launch {
                     val rtt = app.latency.tunnelProbe()
                     withContext(Dispatchers.Main) {
@@ -99,19 +107,25 @@ class AryanVpnService : VpnService() {
     }
 
     private fun fail(e: Throwable) {
-        VpnState.engineResult.value = "Failed"
-        VpnState.lastError.value = ErrorExplainer.explain(e)
-        VpnState.state.value = ConnState.ERROR
-        VpnState.connectedSince.value = null
-        (application as AryanApp).reconnect.onFailure()
+        Handler(Looper.getMainLooper()).post {
+            VpnState.engineResult.value = "Failed"
+            VpnState.lastError.value = ErrorExplainer.explain(e)
+            VpnState.state.value = ConnState.ERROR
+            VpnState.connectedSince.value = null
+            (application as AryanApp).reconnect.onFailure()
+        }
     }
 
     fun stopEngine() {
         synchronized(lock) {
-            VpnState.state.value = ConnState.DISCONNECTING
+            Handler(Looper.getMainLooper()).post {
+                VpnState.state.value = ConnState.DISCONNECTING
+            }
             closeQuietly()
-            VpnState.connectedSince.value = null
-            VpnState.state.value = ConnState.DISCONNECTED
+            Handler(Looper.getMainLooper()).post {
+                VpnState.connectedSince.value = null
+                VpnState.state.value = ConnState.DISCONNECTED
+            }
         }
     }
 
@@ -164,6 +178,7 @@ class AryanVpnService : VpnService() {
     override fun onDestroy() {
         closeQuietly()
         scope.cancel()
+        starterThread.quitSafely()
         super.onDestroy()
     }
 
@@ -175,8 +190,7 @@ class AryanVpnService : VpnService() {
             )
         }
         val pi = PendingIntent.getActivity(
-            this,
-            0,
+            this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
