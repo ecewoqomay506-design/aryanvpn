@@ -1,15 +1,10 @@
 package com.aryan.vpn.vpn
 
 import io.nekohasekai.libbox.*
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
 
-/**
- * PlatformInterface for sing-box libbox 1.9.7 (pinned).
- * 
- * Strategy:
- * - usePlatformDefaultInterfaceMonitor = true  → prevents netlink ban
- * - start/close monitor are empty               → prevents Go stack split crash
- * This is the safest combination for v1.9.7 on Android.
- */
+/** PlatformInterface for the pinned sing-box libbox 1.9.7 engine. */
 class PlatformBridge(
     private val svc: AryanVpnService
 ) : PlatformInterface {
@@ -20,8 +15,31 @@ class PlatformBridge(
         svc.protect(fd)
     }
 
-    override fun openTun(options: TunOptions): Int =
-        svc.openTun(options)
+    /**
+     * TunOptions and its iterators are Go-backed. Reading them on the original
+     * Go-to-Java callback stack re-enters Go and can abort affected runtimes.
+     * Use a separate Java thread, and keep the callback alive until it finishes
+     * so the Go-backed options remain valid throughout VPN establishment.
+     */
+    override fun openTun(options: TunOptions): Int {
+        val task = FutureTask<Int> { svc.openTun(options) }
+        Thread(task, "libbox-tun-setup").start()
+        var interrupted = false
+        try {
+            while (true) {
+                try {
+                    return task.get()
+                } catch (_: InterruptedException) {
+                    // Do not return while the worker still uses Go-backed options.
+                    interrupted = true
+                } catch (e: ExecutionException) {
+                    throw (e.cause ?: e)
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
 
     override fun useProcFS() = false
 
@@ -37,17 +55,13 @@ class PlatformBridge(
 
     override fun uidByPackageName(packageName: String) = -1
 
-    // Critical: tell libbox we handle the monitor (so it won't use netlink)
+    // Avoid the Android netlink monitor, which is restricted for normal apps.
     override fun usePlatformDefaultInterfaceMonitor() = true
 
-    // But do NOT actually register any Android callback (avoids stack split crash)
-    override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
-        // intentionally empty for stability on libbox 1.9.7
-    }
+    // Network-change monitoring is not implemented by this bridge yet.
+    override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {}
 
-    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
-        // intentionally empty
-    }
+    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {}
 
     override fun usePlatformInterfaceGetter() = false
 
@@ -67,9 +81,7 @@ class PlatformBridge(
     }
 }
 
-/**
- * PlatformInterface for temporary proxy-latency checks.
- */
+/** PlatformInterface for temporary proxy-latency checks. */
 class PlatformBridgeNoTun : PlatformInterface {
 
     override fun usePlatformAutoDetectInterfaceControl() = false
