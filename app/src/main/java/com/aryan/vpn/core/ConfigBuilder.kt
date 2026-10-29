@@ -90,14 +90,21 @@ object ConfigBuilder {
                 .put("detour", "direct")
         )
 
-        // Bootstrap: the proxy's own hostname must be resolved directly, not through the proxy
-        // (which would need the hostname resolved first, a DNS loop that times out).
+        // Bootstrap: the proxy's own hostname is resolved over plain UDP, outside the tunnel.
+        // Using the proxy here would be a DNS loop; the system resolver has been unreliable in this path.
+        dnsServers.put(
+            JSONObject()
+                .put("tag", "dns-direct")
+                .put("address", "udp://1.1.1.1")
+                .put("detour", "direct")
+        )
+
         val dnsRules = JSONArray()
         if (serverIsName) {
             dnsRules.put(
                 JSONObject()
                     .put("domain", JSONArray().put(p.connectionHost))
-                    .put("server", "dns-local")
+                    .put("server", "dns-direct")
             )
         }
 
