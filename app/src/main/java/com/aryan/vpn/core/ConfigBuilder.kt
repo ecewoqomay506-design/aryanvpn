@@ -55,13 +55,12 @@ object ConfigBuilder {
                 }
             }
 
-        val serverHost = p.connectionHost
-        val serverIsName = !serverHost.contains(':') && !ipv4Literal.matches(serverHost)
+        val serverIsName = !p.connectionHost.contains(':') && !ipv4Literal.matches(p.connectionHost)
 
         val proxy = JSONObject()
             .put("type", "vless")
             .put("tag", "proxy")
-            .put("server", serverHost)
+            .put("server", p.connectionHost)
             .put("server_port", p.port)
             .put("uuid", p.uuid)
             .put("tls", tls)
@@ -97,7 +96,7 @@ object ConfigBuilder {
         if (serverIsName) {
             dnsRules.put(
                 JSONObject()
-                    .put("domain", JSONArray().put(serverHost))
+                    .put("domain", JSONArray().put(p.connectionHost))
                     .put("server", "dns-local")
             )
         }
