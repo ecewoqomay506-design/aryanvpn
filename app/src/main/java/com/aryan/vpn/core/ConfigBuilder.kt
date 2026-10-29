@@ -9,6 +9,8 @@ import org.json.JSONObject
  */
 object ConfigBuilder {
 
+    private val ipv4Literal = Regex("""\d{1,3}(\.\d{1,3}){3}""")
+
     fun build(
         p: VlessProfile,
         dns: List<String>,
@@ -53,6 +55,8 @@ object ConfigBuilder {
                 }
             }
 
+        val serverIsName = !p.connectionHost.contains(':') && !ipv4Literal.matches(p.connectionHost)
+
         val proxy = JSONObject()
             .put("type", "vless")
             .put("tag", "proxy")
@@ -85,6 +89,24 @@ object ConfigBuilder {
                 .put("address", "local")
                 .put("detour", "direct")
         )
+
+        // Bootstrap: the proxy's own hostname is resolved over plain UDP, outside the tunnel.
+        // Using the proxy here would be a DNS loop; the system resolver has been unreliable in this path.
+        dnsServers.put(
+            JSONObject()
+                .put("tag", "dns-direct")
+                .put("address", "udp://1.1.1.1")
+                .put("detour", "direct")
+        )
+
+        val dnsRules = JSONArray()
+        if (serverIsName) {
+            dnsRules.put(
+                JSONObject()
+                    .put("domain", JSONArray().put(p.connectionHost))
+                    .put("server", "dns-direct")
+            )
+        }
 
         val inbound = if (mixedPort != null) {
             JSONObject()
@@ -128,6 +150,7 @@ object ConfigBuilder {
                 "dns",
                 JSONObject()
                     .put("servers", dnsServers)
+                    .put("rules", dnsRules)
                     .put("final", "dns-0")
                     .put("strategy", "prefer_ipv4")
             )

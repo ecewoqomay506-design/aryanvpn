@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import com.aryan.vpn.AryanApp
 import com.aryan.vpn.MainActivity
 import com.aryan.vpn.R
@@ -21,12 +22,16 @@ import kotlinx.coroutines.*
  * Fixed for libbox 1.9.7 on Android (especially MIUI):
  * - BoxService.start() runs on a dedicated HandlerThread
  *   to avoid "runtime: stack split at bad time" during OpenTun callback.
+ * - The TUN interface is opened here, before the engine starts, so the OpenTun
+ *   callback from Go only hands back an already-open descriptor.
+ * - Diagnostics go to logcat under tag AryanVPN (no credentials are logged).
  */
 class AryanVpnService : VpnService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var box: BoxService? = null
     private var tunFd: ParcelFileDescriptor? = null
+    private var preTun: ParcelFileDescriptor? = null
     private val lock = Any()
 
     // Dedicated thread for starting the Go engine (larger effective stack)
@@ -59,9 +64,11 @@ class AryanVpnService : VpnService() {
             val app = application as AryanApp
             val profile = app.profiles.selected()
             if (profile == null) {
+                Log.w(TAG, "start: no profile selected")
                 fail(IllegalStateException("No profile selected"))
                 return
             }
+            Log.i(TAG, "start: endpoint isIpv6=${profile.isIpv6} connectionHostIsName=${!profile.connectionHost.contains(':') && profile.connectionHost != profile.host} port=${profile.port}")
 
             // Update UI state on Main Thread
             Handler(Looper.getMainLooper()).post {
@@ -75,10 +82,14 @@ class AryanVpnService : VpnService() {
             try {
                 val cfg = ConfigBuilder.build(profile, app.dns.servers())
                 Libbox.checkConfig(cfg)
+                Log.i(TAG, "start: config accepted by libbox")
 
+                preOpenTun()
+                Log.i(TAG, "start: TUN pre-opened")
                 val svc = Libbox.newService(cfg, PlatformBridge(this))
                 svc.start()
                 box = svc
+                Log.i(TAG, "start: engine started")
 
                 Handler(Looper.getMainLooper()).post {
                     VpnState.engineResult.value = "Started"
@@ -87,6 +98,8 @@ class AryanVpnService : VpnService() {
                 // Tunnel probe on background
                 scope.launch {
                     val rtt = app.latency.tunnelProbe()
+                    val probe = app.latency.lastTunnel.value
+                    Log.i(TAG, "tunnel probe: rtt=$rtt status=${probe?.status} error=${probe?.error}")
                     withContext(Dispatchers.Main) {
                         if (rtt == null) {
                             closeQuietly()
@@ -100,6 +113,7 @@ class AryanVpnService : VpnService() {
                     }
                 }
             } catch (e: Throwable) {
+                Log.e(TAG, "start: failed", e)
                 closeQuietly()
                 fail(e)
             }
@@ -107,6 +121,7 @@ class AryanVpnService : VpnService() {
     }
 
     private fun fail(e: Throwable) {
+        Log.e(TAG, "fail: ${e.javaClass.simpleName}: ${e.message}")
         Handler(Looper.getMainLooper()).post {
             VpnState.engineResult.value = "Failed"
             VpnState.lastError.value = ErrorExplainer.explain(e)
@@ -134,10 +149,38 @@ class AryanVpnService : VpnService() {
         box = null
         runCatching { tunFd?.close() }
         tunFd = null
+        runCatching { preTun?.close() }
+        preTun = null
     }
 
-    /** Called by libbox when the tun inbound starts. */
+    /**
+     * Opens the TUN interface on the service thread before libbox starts.
+     * Addresses and routes match ConfigBuilder's tun inbound.
+     */
+    private fun preOpenTun() {
+        if (prepare(this) != null) error("VPN permission not granted")
+        preTun?.close()
+        preTun = Builder()
+            .setSession(getString(R.string.app_name))
+            .setMtu(9000)
+            .addAddress("172.19.0.1", 30)
+            .addAddress("fdfe:dcba:9876::1", 126)
+            .addRoute("0.0.0.0", 0)
+            .addRoute("::", 0)
+            .addDnsServer("172.19.0.2")
+            .establish() ?: error("VPN interface establish() returned null")
+    }
+
+    /** Called by libbox when the tun inbound starts. Reuses the descriptor opened in preOpenTun(). */
     fun openTun(options: TunOptions): Int {
+        preTun?.let { pre ->
+            preTun = null
+            tunFd = pre
+            Log.i(TAG, "openTun: reusing pre-opened fd")
+            return pre.fd
+        }
+
+        Log.i(TAG, "openTun: opening new fd")
         if (prepare(this) != null) error("VPN permission not granted")
 
         val b = Builder()
@@ -205,5 +248,6 @@ class AryanVpnService : VpnService() {
 
     companion object {
         const val ACTION_STOP = "com.aryan.vpn.STOP"
+        private const val TAG = "AryanVPN"
     }
 }
