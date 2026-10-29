@@ -21,12 +21,15 @@ import kotlinx.coroutines.*
  * Fixed for libbox 1.9.7 on Android (especially MIUI):
  * - BoxService.start() runs on a dedicated HandlerThread
  *   to avoid "runtime: stack split at bad time" during OpenTun callback.
+ * - The TUN interface is opened here, before the engine starts, so the OpenTun
+ *   callback from Go only hands back an already-open descriptor.
  */
 class AryanVpnService : VpnService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var box: BoxService? = null
     private var tunFd: ParcelFileDescriptor? = null
+    private var preTun: ParcelFileDescriptor? = null
     private val lock = Any()
 
     // Dedicated thread for starting the Go engine (larger effective stack)
@@ -76,6 +79,7 @@ class AryanVpnService : VpnService() {
                 val cfg = ConfigBuilder.build(profile, app.dns.servers())
                 Libbox.checkConfig(cfg)
 
+                preOpenTun()
                 val svc = Libbox.newService(cfg, PlatformBridge(this))
                 svc.start()
                 box = svc
@@ -134,10 +138,36 @@ class AryanVpnService : VpnService() {
         box = null
         runCatching { tunFd?.close() }
         tunFd = null
+        runCatching { preTun?.close() }
+        preTun = null
     }
 
-    /** Called by libbox when the tun inbound starts. */
+    /**
+     * Opens the TUN interface on the service thread before libbox starts.
+     * Addresses and routes match ConfigBuilder's tun inbound.
+     */
+    private fun preOpenTun() {
+        if (prepare(this) != null) error("VPN permission not granted")
+        preTun?.close()
+        preTun = Builder()
+            .setSession(getString(R.string.app_name))
+            .setMtu(9000)
+            .addAddress("172.19.0.1", 30)
+            .addAddress("fdfe:dcba:9876::1", 126)
+            .addRoute("0.0.0.0", 0)
+            .addRoute("::", 0)
+            .addDnsServer("172.19.0.2")
+            .establish() ?: error("VPN interface establish() returned null")
+    }
+
+    /** Called by libbox when the tun inbound starts. Reuses the descriptor opened in preOpenTun(). */
     fun openTun(options: TunOptions): Int {
+        preTun?.let { pre ->
+            preTun = null
+            tunFd = pre
+            return pre.fd
+        }
+
         if (prepare(this) != null) error("VPN permission not granted")
 
         val b = Builder()
